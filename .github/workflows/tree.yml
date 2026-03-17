@@ -1,0 +1,84 @@
+name: 编译 raphael 设备树（稳健版）
+
+on:
+  push:
+    branches:
+      - dev/*
+      - stable/*
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 安装依赖
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            device-tree-compiler \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            make \
+            dos2unix
+
+      - name: 检出内核源码
+        uses: actions/checkout@v4
+        with:
+          path: kernel
+
+      - name: 深度清理所有相关设备树源文件
+        working-directory: kernel
+        run: |
+          # 清理所有可能被包含的 dts/dtsi 文件（包括公共文件和 raphael 相关文件）
+          find arch/arm64/boot/dts -type f \( -name "*.dts" -o -name "*.dtsi" \) -print0 | while IFS= read -r -d '' FILE; do
+            echo "正在清理: $FILE"
+            # 移除 UTF-8 BOM 头
+            sed -i '1s/^\xEF\xBB\xBF//' "$FILE"
+            # 转换为 Unix 换行符
+            dos2unix "$FILE"
+            # 过滤非打印字符（保留换行、制表符和可打印 ASCII）
+            tr -cd '\11\12\15\40-\176' < "$FILE" > "${FILE}.clean"
+            mv "${FILE}.clean" "$FILE"
+            # 确保文件以换行结尾
+            echo >> "$FILE"
+          done
+
+      - name: 清理之前的构建输出
+        working-directory: kernel
+        run: |
+          rm -rf out
+          mkdir -p out
+
+      - name: 配置内核（使用 raphael_defconfig）
+        working-directory: kernel
+        run: |
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- raphael_defconfig O=out
+
+      - name: 编译所有设备树（忽略单个错误）
+        working-directory: kernel
+        run: |
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- dtbs O=out -k -j$(nproc) || true
+          echo "编译完成（可能部分设备树失败）"
+
+      - name: 收集 raphael 设备树文件
+        run: |
+          mkdir -p dtb_artifacts
+          find kernel/out/arch/arm64/boot/dts -type f \( \
+            -name "raphael*.dtb" -o \
+            -name "raphael*.dtbo" -o \
+            -name "sm8150-xiaomi.dtb" \
+          \) -exec cp {} dtb_artifacts/ \;
+          
+          if [ -z "$(ls -A dtb_artifacts)" ]; then
+            echo "❌ 错误：未找到任何 raphael 设备树文件"
+            exit 1
+          else
+            echo "✅ 找到以下设备树文件："
+            ls -la dtb_artifacts/
+          fi
+
+      - name: 上传设备树文件
+        uses: actions/upload-artifact@v5
+        with:
+          name: dtb-raphael
+          path: dtb_artifacts/
